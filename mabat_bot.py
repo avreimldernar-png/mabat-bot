@@ -25,14 +25,15 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GEMINI_KEY         = os.environ["GEMINI_API_KEY"]
-
+PAYBOX_LINK        = os.environ.get("PAYBOX_LINK", "https://payboxapp.page.link/YOUR_LINK")
 ADMIN_ID           = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
-BIT_PHONE = "050-4064581"
-DAILY_FREE         = 1     # שאלות חינמיות ביום לכל משתמש
+
+DAILY_FREE         = 3     # שאלות חינמיות ביום (500 ראשונים) לכל משתמש
 STARS_PER_PACK     = 50    # כוכבי טלגרם לחבילה
 QUESTIONS_PER_PACK = 20    # שאלות בחבילה
 DAILY_GLOBAL_CAP   = 5000  # מגבלת חירום — נכנסת לפעולה רק במצב קיצוני
-PAYBOX_PRICE_ILS   = 20    # מחיר פייבוקס בשקלים לחודש
+PAYBOX_PRICE_ILS   = 20    # מחיר בשקלים לחודש
+BIT_PHONE          = "050-000-0000"  # ← שנה למספר הביט שלך
 
 # ── אחסון נתונים ──────────────────────────────────────────────────────────────
 
@@ -62,6 +63,11 @@ def get_user(data, uid):
         }
     return data["users"][uid]
 
+def get_daily_limit(data):
+    """3 שאלות ל-500 הראשונים, אחר כך 2."""
+    free_users = sum(1 for u in data["users"].values() if not u.get("paid_until"))
+    return DAILY_FREE if free_users <= 500 else 2
+
 def can_ask(data, uid):
     """בודק אם המשתמש יכול לשאול. מחזיר (bool, סיבה)."""
     today = str(date.today())
@@ -72,11 +78,11 @@ def can_ask(data, uid):
 
     user = get_user(data, uid)
 
-    # משלמי פייבוקס — פטורים מכל מגבלה גלובלית, תמיד עוברים
+    # משלמים — פטורים מכל מגבלה, תמיד עוברים
     if user["paid_until"] and user["paid_until"] >= today:
         return True, "paid_unlimited"
 
-    # מגבלה גלובלית — חלה רק על משתמשים חינמיים וכוכבים
+    # מגבלה גלובלית — חלה רק על משתמשים חינמיים
     if data["global"]["count"] >= DAILY_GLOBAL_CAP:
         return False, "global_cap"
 
@@ -84,11 +90,12 @@ def can_ask(data, uid):
     if user["extra_questions"] > 0:
         return True, "extra"
 
-    # שאלה חינמית יומית
+    # שאלות חינמיות יומיות (3 ל-500 ראשונים, אחר כך 2)
+    daily_limit = get_daily_limit(data)
     if user["daily_date"] != today:
         user["daily_date"] = today
         user["daily_used"] = 0
-    if user["daily_used"] < DAILY_FREE:
+    if user["daily_used"] < daily_limit:
         return True, "free"
 
     return False, "limit_reached"
@@ -114,26 +121,65 @@ gemini = genai.GenerativeModel(
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
 
-SYSTEM_OBJECTIVE = """אתה עיתונאי המתרגם כיסוי בינלאומי לעברית תקנית.
+SYSTEM_OBJECTIVE = """אתה עיתונאי בינלאומי שמביא לישראלים את הכיסוי הבינלאומי — קצר, מדויק, ובלתי נשכח.
 התאריך היום: {today}.
 
-חוקים:
-1. חפש מקורות כמו רויטרס, בי-בי-סי, אי-פי, הגארדיאן, הארץ אנגלית.
-2. הבא 3 עד 4 ציטוטים מדויקים — תרגם לעברית ברורה ונוחה לקריאה.
-3. לכל ציטוט: שם המקור, כותרת המאמר, תאריך.
-4. לסיום: פסקה קצרה — מה בולט בכיסוי הבינלאומי ומה פחות מוזכר.
-5. אם לא מצאת — אמור זאת בכנות."""
+חוקים קריטיים:
+- הבא מידע מהשנה האחרונה בלבד. אם אין — אמור במפורש. לעולם אל תביא מידע ישן בלי להזהיר.
+- מקורות: רויטרס, בי-בי-סי, AP, הגארדיאן, פוליטיקו, NYT.
+- עברית פשוטה, זורמת, לא אקדמית.
 
-SYSTEM_OTHER = """אתה מראה לישראלים את הנרטיב הבינלאומי הביקורתי.
+פורמט קבוע — תמיד בדיוק כך:
+
+📍 *[כותרת חדה — מה קורה, שורה אחת]*
+
+━━━━━━━━━━━━━━━━
+
+🔹 *[ציטוט 1 — משפט אחד, מתורגם]*
+— [מקור], [תאריך]
+
+🔹 *[ציטוט 2 — משפט אחד, מתורגם]*
+— [מקור], [תאריך]
+
+🔹 *[ציטוט 3 — משפט אחד, מתורגם]*
+— [מקור], [תאריך]
+
+━━━━━━━━━━━━━━━━
+
+💡 *מה בולט:* [משפט אחד — מה הכיסוי הבינלאומי מדגיש שפחות שומעים בישראל]
+
+אם אין מידע עדכני — כתוב: "לא מצאתי כיסוי עדכני על זה. נסה לנסח אחרת או שאל על אירוע ספציפי." """
+
+SYSTEM_OTHER = """אתה חושף לישראלים את הפער בין הנרטיבים — איך אותו אירוע נראה אחרת לגמרי בתקשורות שונות.
 התאריך היום: {today}.
 
-חוקים:
-1. חפש מקורות כמו אל-ג'זירה, מידל איסט איי, הגארדיאן, דמוקרסי נאו.
-2. הבא 3 עד 4 ציטוטים מדויקים — תרגם לעברית ברורה.
-3. לכל ציטוט: שם המקור, כותרת, תאריך.
-4. לסיום: "הנרטיב המקביל" — במה שונה הכיסוי הזה ממה שמוצג בישראל.
-5. הבהר: זהו הנרטיב כפי שמוצג במדיה זו, לא עמדת הבוט.
-6. אם לא מצאת — אמור זאת בכנות."""
+חוקים קריטיים:
+- הבא מידע מהשנה האחרונה בלבד. אם אין — אמור במפורש.
+- לעולם אל תביא מידע ישן בלי להזהיר.
+- עברית פשוטה, זורמת, לא אקדמית.
+
+פורמט קבוע — תמיד בדיוק כך:
+
+📍 *[האירוע — שורה אחת]*
+
+━━━━━━━━━━━━━━━━
+
+🇮🇱 *בישראל קוראים לזה:*
+"[ציטוט או תיאור קצר]"
+
+🌍 *במערב קוראים לזה:*
+"[ציטוט או תיאור קצר]"
+
+🌙 *בעולם הערבי/גלובל-סאות' קוראים לזה:*
+"[ציטוט או תיאור קצר]"
+
+━━━━━━━━━━━━━━━━
+
+🔍 *הפער:* [משפט אחד — מה ההבדל שרוב הישראלים לא רואים]
+
+⚠️ _זהו הנרטיב כפי שמוצג בתקשורת הבינלאומית — לא עמדת הבוט._
+
+אם אין מידע עדכני — כתוב: "לא מצאתי כיסוי עדכני על זה. נסה לנסח אחרת." """
 
 async def ask_gemini(query: str, mode: str) -> str:
     system = (SYSTEM_OBJECTIVE if mode == "objective" else SYSTEM_OTHER).format(today=today_str())
@@ -168,14 +214,13 @@ def limit_keyboard():
 
 WELCOME = """👁️ *מבט מבחוץ*
 
-מה כותבים על ישראל בעולם?
-אני מחפש ברשת בזמן אמת ומביא לך ציטוטים מתורגמים מהעיתונות הבינלאומית — בעברית נוחה.
+מה כותבים על ישראל בעולם — בעברית, בלי פילטרים.
 
-✅ שאלה אחת חינמית בכל יום
-✅ שני מצבים: אובייקטיבי או ביקורתי
-✅ חיפוש עדכני עם תאריך מדויק
+✅ *3 שאלות ביום* — הטבה ל-500 המצטרפים הראשונים
+✅ שני מצבים: אובייקטיבי 🔹 או נרטיב אחר 🔴
+✅ ציטוטים מתורגמים מהעיתונות הבינלאומית
 
-כתוב כל נושא או אירוע ואני אחפש."""
+כתוב כל נושא או אירוע — ואני אחפש."""
 
 # ── handlers ──────────────────────────────────────────────────────────────────
 
@@ -238,9 +283,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "buy_paybox":
         text = (
             f"💚 *גישה חודשית ללא הגבלה*\n\n"
-            f"מחיר: {PAYBOX_PRICE_ILS} ₪ לחודש\n\n"
-            f"שלח תשלום בביט או בפייבוקס:\n{BIT_PHONE}\n\n"
-            f"⚠️ חשוב: בשדה ההערה כתוב את המספר הזה:\n`{uid}`\n\n"
+            f"מחיר: 20 ₪ לחודש\n\n"
+            f"שלח תשלום בביט למספר: {BIT_PHONE}\n\n"
+            f"⚠️ חשוב: בהערה כתוב את המספר הזה:\n`{uid}`\n\n"
             f"תוך 24 שעות תקבל אישור ותוכל לשאול ללא הגבלה."
         )
         await q.message.reply_text(text, parse_mode="Markdown")
@@ -268,7 +313,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     save_data(data)
     await update.message.reply_text(
         f"✅ תשלום התקבל! נוספו לך {QUESTIONS_PER_PACK} שאלות.\n"
-        f"יתרה זמינה: {user['extra_questions']} שאלות + שאלה חינמית יומית."
+        f"יתרה זמינה: {user['extra_questions']} שאלות נוספות + {DAILY_FREE} שאלות יומיות."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,8 +335,8 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
             )
         else:
             msg = (
-                "📵 *השאלה החינמית היומית נוצלה*\n\n"
-                "מגיעה לך שאלה חינמית אחת בכל יום. היא כבר נוצלה היום.\n\n"
+                "📵 *מכסת השאלות היומית נוצלה*\n\n"
+                f"נוצלו כל השאלות של היום. חזור מחר — או הוסף שאלות עכשיו:\n\n"
                 "איך להמשיך:"
             )
         await reply.reply_text(msg, parse_mode="Markdown", reply_markup=limit_keyboard())
@@ -299,6 +344,17 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
 
     mode = user.get("mode", "objective")
     mode_label = "אובייקטיבי" if mode == "objective" else "הנרטיב האחר"
+
+    # זיהוי שאלה עמומה מדי — לא נספרת במכסה
+    if len(query.strip()) <= 6 and not any(c in query for c in ['?', '!']):
+        await reply.reply_text(
+            "🤔 *קצת עמום לי...*\n\n"
+            "תן לי יותר הקשר — על מה בדיוק?\n\n"
+            "לדוגמה: במקום _איראן_ — נסה _תוכנית הגרעין האיראנית_",
+            parse_mode="Markdown"
+        )
+        return
+
     thinking = await reply.reply_text(f"🔍 מחפש [{mode_label}]...")
 
     result = await ask_gemini(query, mode)
@@ -317,9 +373,9 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
     # תזכורת עדינה אחרי שנוצלה השאלה החינמית
     if reason == "free":
         user = get_user(load_data(), uid)
-        if user["daily_used"] >= DAILY_FREE:
+        if user["daily_used"] >= get_daily_limit(load_data()):
             await reply.reply_text(
-                "💡 _זו הייתה השאלה החינמית של היום. חזור מחר, או הוסף שאלות עכשיו:_",
+                "💡 _נוצלו כל השאלות של היום. חזור מחר, או הוסף שאלות עכשיו:_",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("⭐ 20 שאלות — כוכבים", callback_data="buy_stars"),
