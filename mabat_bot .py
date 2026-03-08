@@ -239,9 +239,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"💚 *גישה חודשית ללא הגבלה*\n\n"
             f"מחיר: {PAYBOX_PRICE_ILS} ₪ לחודש\n\n"
-            f"שלח תשלום דרך פייבוקס:\n{PAYBOX_LINK}\n\n"
+            f"שלח תשלום בביט או בפייבוקס:\n{050-4064581}\n\n"
             f"⚠️ חשוב: בשדה ההערה כתוב את המספר הזה:\n`{uid}`\n\n"
-            f"תוך עד 24 שעות תקבל אישור ותוכל לשאול ללא הגבלה."
+            f"תוך 24 שעות תקבל אישור ותוכל לשאול ללא הגבלה."
         )
         await q.message.reply_text(text, parse_mode="Markdown")
 
