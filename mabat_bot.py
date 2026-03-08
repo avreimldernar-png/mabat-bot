@@ -27,7 +27,7 @@ TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GEMINI_KEY         = os.environ["GEMINI_API_KEY"]
 
 ADMIN_ID           = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
-
+BIT_PHONE = "050-4064581"
 DAILY_FREE         = 1     # שאלות חינמיות ביום לכל משתמש
 STARS_PER_PACK     = 50    # כוכבי טלגרם לחבילה
 QUESTIONS_PER_PACK = 20    # שאלות בחבילה
@@ -239,7 +239,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"💚 *גישה חודשית ללא הגבלה*\n\n"
             f"מחיר: {PAYBOX_PRICE_ILS} ₪ לחודש\n\n"
-            f"שלח תשלום בביט או בפייבוקס:\n{"+972-50-4064581"}\n\n"
+            f"שלח תשלום בביט או בפייבוקס:\n{BIT_PHONE}\n\n"
             f"⚠️ חשוב: בשדה ההערה כתוב את המספר הזה:\n`{uid}`\n\n"
             f"תוך 24 שעות תקבל אישור ותוכל לשאול ללא הגבלה."
         )
