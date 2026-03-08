@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GEMINI_KEY         = os.environ["GEMINI_API_KEY"]
-PAYBOX_LINK        = os.environ.get("PAYBOX_LINK", "https://payboxapp.page.link/YOUR_LINK")
+
 ADMIN_ID           = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 
 DAILY_FREE         = 1     # שאלות חינמיות ביום לכל משתמש
