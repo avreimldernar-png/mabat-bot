@@ -112,7 +112,7 @@ def use_question(data, uid, reason):
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 groq_client = Groq(api_key=GROQ_KEY)
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "compound-beta"
 
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
