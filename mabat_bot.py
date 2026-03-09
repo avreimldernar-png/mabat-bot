@@ -417,12 +417,13 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
                 "📵 *מכסת השאלות היומית נוצלה*\n\n"
                 "חזור מחר — או הוסף שאלות עכשיו:"
             )
-        await reply.reply_text(msg, parse_mode="Markdown", reply_markup=limit_keyboard())
+        await context.bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=limit_keyboard())
         return
 
     # שאלה עמומה — לא נספרת
     if len(query.strip()) <= 5 and not any(c in query for c in ["?", "!"]):
-        await reply.reply_text(
+        await context.bot.send_message(
+            chat_id,
             "🤔 *קצת עמום לי...*\n\n"
             "תן לי יותר הקשר — על מה בדיוק?\n\n"
             "לדוגמה: במקום _איראן_ — נסה _תוכנית הגרעין האיראנית_",
@@ -448,11 +449,11 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
     await thinking.edit_text(part1[:3900], parse_mode="Markdown")
 
     if part2:
-        await reply.reply_text(part2[:3900], parse_mode="Markdown",
-                               reply_markup=expand_keyboard(query))
+        await context.bot.send_message(chat_id, part2[:3900], parse_mode="Markdown",
+                                       reply_markup=expand_keyboard(query))
     else:
-        await reply.reply_text("לפרטים נוספים — שאל שאלת המשך.",
-                               reply_markup=expand_keyboard(query))
+        await context.bot.send_message(chat_id, "לפרטים נוספים — שאל שאלת המשך.",
+                                       reply_markup=expand_keyboard(query))
 
     # הצעת שיתוף אחת מכל 5 שאלות
     fresh_data = load_data()
@@ -460,7 +461,8 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
     if fresh_user["total_questions"] > 0 and fresh_user["total_questions"] % 5 == 0:
         bot_username = (await context.bot.get_me()).username
         ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
-        await reply.reply_text(
+        await context.bot.send_message(
+            chat_id,
             f"📤 _אהבת? שתף חבר וקבל 3 שאלות בונוס:_\n`{ref_link}`",
             parse_mode="Markdown"
         )
@@ -470,7 +472,8 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
         fresh_data2 = load_data()
         fresh_user2 = get_user(fresh_data2, uid)
         if fresh_user2["daily_used"] >= get_daily_limit(fresh_data2):
-            await reply.reply_text(
+            await context.bot.send_message(
+                chat_id,
                 "💡 _נוצלו כל השאלות של היום. חזור מחר, או הוסף שאלות עכשיו:_",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
