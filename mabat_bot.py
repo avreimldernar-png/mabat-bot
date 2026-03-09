@@ -217,13 +217,11 @@ async def ask_groq(query: str, expand_prompt: str = None) -> tuple:
     bait = await generate_bait(query)
 
     system = SYSTEM_MAIN.format(today=today_str(), bait=bait)
-    # ניסוח שמאלץ חיפוש אינטרנט — המודל מחפש כשמזהה שצריך מידע עכשווי
-    forced_query = (
-        f"חפש עכשיו באינטרנט: מה כתבו על '{query}' בתקשורת הבינלאומית ב-7 הימים האחרונים? "
-        f"אני צריך כתבות אמיתיות מ-{today_str()} לאחור — לא ידע כללי. "
-        f"אם לא מצאת כתבות אמיתיות — אמור במפורש שאין מידע עדכני."
+    prompt = (
+        f"{system}\n\n"
+        f"חפש עכשיו באינטרנט על: '{query}' — כתבות מ-7 הימים האחרונים בלבד. "
+        f"תאריך היום: {today_str()}. אם אין מידע עדכני — אמור בכנות."
     )
-    prompt = f"{system}\n\nשאלת המשתמש המקורית: {query}\n\nמשימת החיפוש: {forced_query}"
 
     try:
         response = await asyncio.to_thread(
@@ -336,7 +334,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         expand_prompt = expand_map.get(expand_type, "הרחב על הנושא")
 
-        thinking = await q.message.reply_text("🔍 מחפש...")
+        thinking = await context.bot.send_message(q.message.chat_id, "🔍 מחפש...")
         result, _ = await ask_groq(original_query, expand_prompt)
         await thinking.edit_text(result[:3900], parse_mode="Markdown")
         return
@@ -355,7 +353,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ חשוב: בהערה כתוב את המספר הזה:\n`{uid}`\n\n"
             f"תוך 24 שעות יתווספו 20 שאלות לחשבונך."
         )
-        await q.message.reply_text(text, parse_mode="Markdown")
+        await context.bot.send_message(q.message.chat_id, text, parse_mode="Markdown")
 
     elif q.data == "buy_paybox":
         text = (
@@ -364,7 +362,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ חשוב: בהערה כתוב את המספר הזה:\n`{uid}`\n\n"
             f"תוך 24 שעות תקבל אישור ותוכל לשאול ללא הגבלה."
         )
-        await q.message.reply_text(text, parse_mode="Markdown")
+        await context.bot.send_message(q.message.chat_id, text, parse_mode="Markdown")
 
     elif q.data == "referral":
         bot_username = (await context.bot.get_me()).username
@@ -376,7 +374,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"הקישור האישי שלך:\n`{ref_link}`\n\n"
             f"הצטרפו דרכך עד כה: {user.get('referral_count', 0)} אנשים"
         )
-        await q.message.reply_text(text, parse_mode="Markdown")
+        await context.bot.send_message(q.message.chat_id, text, parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
