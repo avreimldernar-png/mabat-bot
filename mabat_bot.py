@@ -95,7 +95,7 @@ def use_question(data, uid, reason):
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 groq_client = Groq(api_key=GROQ_KEY)
-GROQ_MODEL = "compound-beta"  # אם נכשל — נסה "groq/compound"
+GROQ_MODEL = "groq/compound"  # GA version with web search
 
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
@@ -217,7 +217,13 @@ async def ask_groq(query: str, expand_prompt: str = None) -> tuple:
     bait = await generate_bait(query)
 
     system = SYSTEM_MAIN.format(today=today_str(), bait=bait)
-    prompt = f"{system}\n\nשאלת המשתמש: {query}"
+    # ניסוח שמאלץ חיפוש אינטרנט — המודל מחפש כשמזהה שצריך מידע עכשווי
+    forced_query = (
+        f"חפש עכשיו באינטרנט: מה כתבו על '{query}' בתקשורת הבינלאומית ב-7 הימים האחרונים? "
+        f"אני צריך כתבות אמיתיות מ-{today_str()} לאחור — לא ידע כללי. "
+        f"אם לא מצאת כתבות אמיתיות — אמור במפורש שאין מידע עדכני."
+    )
+    prompt = f"{system}\n\nשאלת המשתמש המקורית: {query}\n\nמשימת החיפוש: {forced_query}"
 
     try:
         response = await asyncio.to_thread(
@@ -233,11 +239,22 @@ async def ask_groq(query: str, expand_prompt: str = None) -> tuple:
             parts = text.split("<<<PART2>>>", 1)
             part1 = parts[0].strip()
             part2 = parts[1].strip()
+        elif "חלק ב" in text or "הסיפור המלא" in text:
+            # המודל כתב את שני החלקים אבל בלי הסימן — מחפש את הגבול
+            for marker in ["📰", "— חלק ב", "===חלק ב"]:
+                if marker in text:
+                    idx = text.index(marker)
+                    part1 = text[:idx].strip()
+                    part2 = text[idx:].strip()
+                    break
+            else:
+                mid = len(text) // 2
+                part1 = text[:mid].strip()
+                part2 = text[mid:].strip()
         else:
-            # אם המודל לא הפריד — חלוקה גסה באמצע
-            mid = len(text) // 2
-            part1 = text[:mid].strip()
-            part2 = text[mid:].strip()
+            # אין חלק ב בכלל — שולחים הכל כחלק א
+            part1 = text.strip()
+            part2 = None
 
         return part1, part2
 
