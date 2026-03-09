@@ -95,7 +95,7 @@ def use_question(data, uid, reason):
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 groq_client = Groq(api_key=GROQ_KEY)
-GROQ_MODEL = "groq/compound"  # GA version with web search
+GROQ_MODEL = "compound-beta"
 
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
@@ -424,6 +424,12 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
     thinking = await reply.reply_text("🔍 מחפש בכותרות הבינלאומיות...")
 
     part1, part2 = await ask_groq(query)
+
+    # הגנה מפני תשובה ריקה
+    if not part1 or len(part1.strip()) < 10:
+        await thinking.edit_text("⚠️ לא הצלחתי למצוא מידע על הנושא הזה. נסה לנסח אחרת.")
+        return
+
     use_question(data, uid, reason)
 
     await thinking.edit_text(part1[:3900], parse_mode="Markdown")
