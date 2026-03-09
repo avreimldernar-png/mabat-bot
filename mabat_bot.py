@@ -7,6 +7,7 @@ import os
 import logging
 import json
 import asyncio
+import httpx
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GROQ_KEY           = os.environ["GROQ_API_KEY"]
+NEWS_API_KEY       = os.environ.get("NEWS_API_KEY", "")
 ADMIN_ID           = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 BIT_PHONE          = os.environ.get("BIT_PHONE", "")
 
@@ -95,46 +97,102 @@ def use_question(data, uid, reason):
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 groq_client = Groq(api_key=GROQ_KEY)
-GROQ_MODEL = "compound-beta"
+GROQ_MODEL = "llama-3.3-70b-versatile"  # מודל אמין לעיבוד טקסט
 
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# חיפוש אמיתי ב-NewsAPI
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def translate_query(query: str) -> str:
+    """מתרגם שאלה בעברית לאנגלית לצורך חיפוש."""
+    try:
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": f"Translate to English for news search (2-5 words only, no explanation): {query}"}],
+            max_tokens=20,
+            temperature=0,
+        )
+        return response.choices[0].message.content.strip().strip('"')
+    except Exception:
+        return query
+
+async def fetch_news(query: str) -> str:
+    """מתרגם שאלה לאנגלית, מחפש כתבות ב-NewsAPI ומחזיר טקסט מסוכם."""
+    try:
+        en_query = await translate_query(query)
+        logger.info(f"NewsAPI query: '{query}' → '{en_query}'")
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://newsapi.org/v2/everything",
+                params={
+                    "q": f"{en_query} Israel",
+                    "language": "en",
+                    "sortBy": "publishedAt",
+                    "pageSize": 10,
+                    "apiKey": NEWS_API_KEY,
+                }
+            )
+            data = resp.json()
+
+        articles = data.get("articles", [])
+        if not articles:
+            return ""
+
+        # בונה טקסט מהכתבות
+        lines = []
+        for a in articles[:8]:
+            source = a.get("source", {}).get("name", "")
+            title = a.get("title", "")
+            desc = a.get("description", "") or ""
+            pub = a.get("publishedAt", "")[:10]
+            if title and source:
+                lines.append(f"[{source}, {pub}]: {title}. {desc[:200]}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error(f"NewsAPI error: {e}")
+        return ""
+
+# ══════════════════════════════════════════════════════════════════════════════
 # הפרומפט הראשי — הלב של הבוט
 # ══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_MAIN = """אתה "מבט מבחוץ" — עיתונאי שמביא כיסוי בינלאומי על ישראל. תאריך: {today}.
+SYSTEM_MAIN = """אתה "מבט מבחוץ" — עיתונאי שמנתח כיסוי בינלאומי על ישראל. תאריך: {today}.
+
+קיבלת כתבות אמיתיות מתקשורת בינלאומית. נתח אותן והחזר:
 
 חוקים:
-- חפש מידע עדכני מהשבוע האחרון בלבד.
-- מקורות בינלאומיים בלבד: Reuters, AP, BBC, Al Jazeera, NYT, Guardian, Le Monde, Der Spiegel וכדומה. אסור לצטט ynet, haaretz, maariv, jpost, ערוץ 7, וואלה, או כל מקור ישראלי אחר.
-- אל תמציא — אם אין מקור בינלאומי אמיתי, אמור "לא מצאתי כיסוי בינלאומי עדכני."
-- כל ציטוט: שם מקור + תאריך.
+- השתמש רק במידע מהכתבות שקיבלת. אל תוסיף מידע שאינו שם.
+- אם הכתבות לא מספיקות — אמור בכנות.
+- כל ציטוט: שם מקור + תאריך מהכתבה.
 - הכל בעברית בלבד.
-- שלושת הנרטיבים על אותו אירוע בדיוק.
 
 פורמט — שני חלקים מופרדים ב-<<<PART2>>>:
 
-📍 *[כותרת בעברית]*
-🇮🇱 *ישראל:* "[מה הנרטיב הישראלי הרשמי]"
-🌍 *המערב:* "[עמדה ממקור מערבי — שם המקור]"
-🌙 *העולם הערבי:* "[עמדה ממקור ערבי — שם המקור]"
-🔍 *הפער:* [משפט אחד — מה ישראלים לא שומעים]
+📍 *[כותרת בעברית — מה קורה]*
+🇮🇱 *ישראל:* "[הנרטיב הישראלי לפי הכתבות]"
+🌍 *המערב:* "[הנרטיב המערבי לפי הכתבות — מקור]"
+🌙 *העולם הערבי:* "[הנרטיב הערבי לפי הכתבות — מקור]"
+🔍 *הפער:* [מה ישראלים לא שומעים]
 
 <<<PART2>>>
 
 📰 *הסיפור המלא*
-🔹 [ציטוט] — *[מקור בינלאומי]*, [תאריך]
-🔹 [ציטוט] — *[מקור בינלאומי]*, [תאריך]
-🔹 [ציטוט] — *[מקור בינלאומי]*, [תאריך]
+🔹 [ציטוט מתורגם] — *[מקור]*, [תאריך]
+🔹 [ציטוט מתורגם] — *[מקור]*, [תאריך]
+🔹 [ציטוט מתורגם] — *[מקור]*, [תאריך]
 ━━━━━━━━━━━━━━━━
 💡 *מה בולט:* [משפט-שניים]
 🔒 *{bait}*"""
 
 BAIT_PROMPT = """לנושא "{query}" — כתוב משפט פיתיון אחד קצר (עד 15 מילה) שמרמז על זווית שלא סוקרה. רק המשפט, בעברית."""
 
-SYSTEM_EXPAND = """המשך על "{query}" — {today}. חפש מידע עדכני. עברית. מקורות עם תאריכים."""
+SYSTEM_EXPAND = """המשך על "{query}" — {today}. עברית. התבסס על הכתבות שקיבלת."""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # קריאות API
@@ -157,18 +215,20 @@ async def generate_bait(query: str) -> str:
     except Exception:
         return "יש עוד זווית אחת שלא פורסמה בישראל — שאל ואסביר."
 
-async def ask_groq(query: str, expand_prompt: str = None) -> tuple:
+async def ask_groq(query: str, expand_prompt: str = None, articles: str = "") -> tuple:
     """מחזיר (חלק_א, חלק_ב) או (טקסט_הרחבה, None)"""
 
     if expand_prompt:
-        system = SYSTEM_EXPAND.format(query=query, today=today_str())
-        prompt = f"{system}\n\nבקשה: {expand_prompt}"
+        prompt = (
+            f"{SYSTEM_EXPAND.format(query=query, today=today_str())}\n\n"
+            f"כתבות:\n{articles}\n\nבקשה: {expand_prompt}"
+        )
         try:
             response = await asyncio.to_thread(
                 groq_client.chat.completions.create,
                 model=GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1000,
+                max_tokens=800,
                 temperature=0.3,
             )
             return response.choices[0].message.content.strip(), None
@@ -176,48 +236,33 @@ async def ask_groq(query: str, expand_prompt: str = None) -> tuple:
             logger.error(f"Groq expand error: {e}")
             return "⚠️ שגיאה זמנית. נסה שוב.", None
 
-    # יצירת פיתיון דינמי לפני השאלה הראשית
     bait = await generate_bait(query)
-
     system = SYSTEM_MAIN.format(today=today_str(), bait=bait)
-    prompt = (
-        f"{system}\n\n"
-        f"חפש עכשיו באינטרנט על: '{query}' — כתבות מ-7 הימים האחרונים בלבד. "
-        f"תאריך היום: {today_str()}. אם אין מידע עדכני — אמור בכנות."
-    )
+
+    if not articles:
+        return "⚠️ לא מצאתי כתבות בינלאומיות על הנושא הזה. נסה לנסח אחרת.", None
+
+    prompt = f"{system}\n\nכתבות שנמצאו:\n{articles}\n\nשאלת המשתמש: {query}"
 
     try:
         response = await asyncio.to_thread(
             groq_client.chat.completions.create,
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
+            max_tokens=1200,
             temperature=0.3,
         )
         text = response.choices[0].message.content.strip()
 
         if "<<<PART2>>>" in text:
             parts = text.split("<<<PART2>>>", 1)
-            part1 = parts[0].strip()
-            part2 = parts[1].strip()
-        elif "חלק ב" in text or "הסיפור המלא" in text:
-            # המודל כתב את שני החלקים אבל בלי הסימן — מחפש את הגבול
-            for marker in ["📰", "— חלק ב", "===חלק ב"]:
-                if marker in text:
-                    idx = text.index(marker)
-                    part1 = text[:idx].strip()
-                    part2 = text[idx:].strip()
-                    break
-            else:
-                mid = len(text) // 2
-                part1 = text[:mid].strip()
-                part2 = text[mid:].strip()
+            return parts[0].strip(), parts[1].strip()
+        elif "📰" in text:
+            idx = text.index("📰")
+            return text[:idx].strip(), text[idx:].strip()
         else:
-            # אין חלק ב בכלל — שולחים הכל כחלק א
-            part1 = text.strip()
-            part2 = None
-
-        return part1, part2
+            mid = len(text) // 2
+            return text[:mid].strip(), text[mid:].strip()
 
     except Exception as e:
         logger.error(f"Groq main error: {e}")
@@ -298,7 +343,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expand_prompt = expand_map.get(expand_type, "הרחב על הנושא")
 
         thinking = await context.bot.send_message(q.message.chat_id, "🔍 מחפש...")
-        result, _ = await ask_groq(original_query, expand_prompt)
+        articles = await fetch_news(original_query)
+        result, _ = await ask_groq(original_query, expand_prompt=expand_prompt, articles=articles)
         await thinking.edit_text(result[:3900], parse_mode="Markdown")
         return
 
@@ -388,7 +434,9 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
     chat_id = update.callback_query.message.chat_id if from_callback else update.message.chat_id
     thinking = await context.bot.send_message(chat_id, "🔍 מחפש בכותרות הבינלאומיות...")
 
-    part1, part2 = await ask_groq(query)
+    # חיפוש כתבות אמיתיות
+    articles = await fetch_news(query)
+    part1, part2 = await ask_groq(query, articles=articles)
 
     # הגנה מפני תשובה ריקה
     if not part1 or len(part1.strip()) < 10:
