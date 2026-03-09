@@ -1,6 +1,6 @@
 """
 מבט מבחוץ — בוט טלגרם
-תכונות: ג'מיני חינמי, מגבלת שאלה ביום, כוכבי טלגרם, פייבוקס, ויראליות
+תכונות: Groq/Llama חינמי, מגבלת שאלות ביום, ביט, ויראליות, פורמט מאוחד
 """
 
 import os
@@ -14,7 +14,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ContextTypes, filters
 )
-import google.generativeai as genai
+from groq import Groq
 
 # ── לוגים ─────────────────────────────────────────────────────────────────────
 
@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 # ── הגדרות סביבה ──────────────────────────────────────────────────────────────
 
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
-GEMINI_KEY         = os.environ["GEMINI_API_KEY"]
-PAYBOX_LINK        = os.environ.get("PAYBOX_LINK", "https://payboxapp.page.link/YOUR_LINK")
+GROQ_KEY           = os.environ["GROQ_API_KEY"]
 ADMIN_ID           = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 
 DAILY_FREE         = 3     # שאלות חינמיות ביום (500 ראשונים) לכל משתמש
@@ -33,7 +32,7 @@ STARS_PER_PACK     = 50    # כוכבי טלגרם לחבילה
 QUESTIONS_PER_PACK = 20    # שאלות בחבילה
 DAILY_GLOBAL_CAP   = 5000  # מגבלת חירום — נכנסת לפעולה רק במצב קיצוני
 PAYBOX_PRICE_ILS   = 20    # מחיר בשקלים לחודש
-BIT_PHONE          = "050-000-0000"  # ← שנה למספר הביט שלך
+BIT_PHONE          = os.environ.get("BIT_PHONE", "")  # מספר ביט — הגדר ב-Railway
 
 # ── אחסון נתונים ──────────────────────────────────────────────────────────────
 
@@ -110,105 +109,128 @@ def use_question(data, uid, reason):
         user["daily_used"] += 1
     save_data(data)
 
-# ── ג'מיני ────────────────────────────────────────────────────────────────────
+# ── Groq ──────────────────────────────────────────────────────────────────────
 
-genai.configure(api_key=GEMINI_KEY)
-gemini = genai.GenerativeModel(
-    model_name="gemini-2.5-flash-lite",
-    generation_config={"temperature": 0.4, "max_output_tokens": 1200},
-)
+groq_client = Groq(api_key=GROQ_KEY)
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
 
-SYSTEM_OBJECTIVE = """אתה עיתונאי בינלאומי שמביא לישראלים את הכיסוי הבינלאומי — קצר, מדויק, ובלתי נשכח.
+# פרומפט אחד מאוחד — מחזיר שני חלקים
+SYSTEM_MAIN = """אתה עיתונאי בינלאומי שחושף לישראלים את הפער בין הנרטיבים.
 התאריך היום: {today}.
 
 חוקים קריטיים:
-- הבא מידע מהשנה האחרונה בלבד. אם אין — אמור במפורש. לעולם אל תביא מידע ישן בלי להזהיר.
-- מקורות: רויטרס, בי-בי-סי, AP, הגארדיאן, פוליטיקו, NYT.
+- מידע מהשנה האחרונה בלבד. אם אין — אמור במפורש.
 - עברית פשוטה, זורמת, לא אקדמית.
+- לעולם אל תמציא ציטוטים.
 
-פורמט קבוע — תמיד בדיוק כך:
+החזר תשובה בשני חלקים מופרדים על ידי הסימן <<<PART2>>>
 
-📍 *[כותרת חדה — מה קורה, שורה אחת]*
+===חלק א — מבט מהיר===
+פורמט קבוע:
+
+📍 *[כותרת — מה קורה]*
+
+🇮🇱 *ישראל:* "[ציטוט קצר או תיאור]"
+🌍 *המערב:* "[ציטוט קצר או תיאור]"
+🌙 *העולם הערבי:* "[ציטוט קצר או תיאור]"
+
+🔍 *הפער:* [משפט אחד — מה שישראלים לא שומעים]
+
+<<<PART2>>>
+
+===חלק ב — מה שמאחורי הכותרות===
+פורמט קבוע:
+
+📰 *הסיפור המלא*
+
+🔹 [ציטוט 1 מתורגם — משפט שלם]
+— [מקור], [תאריך]
+
+🔹 [ציטוט 2 מתורגם — משפט שלם]
+— [מקור], [תאריך]
+
+🔹 [ציטוט 3 מתורגם — משפט שלם]
+— [מקור], [תאריך]
 
 ━━━━━━━━━━━━━━━━
+💡 *מה בולט:* [מה הכיסוי הבינלאומי מדגיש שפחות שומעים בישראל]
 
-🔹 *[ציטוט 1 — משפט אחד, מתורגם]*
-— [מקור], [תאריך]
+🔒 *יש עוד:* [משפט אחד מסקרן שמרמז על זווית נוספת — בלי לחשוף אותה. משהו שגרם לך לעצור ולחשוב. ניסוח בסגנון: "יש דיווח שפורסם רק ב-X ולא הגיע לישראל..."]
 
-🔹 *[ציטוט 2 — משפט אחד, מתורגם]*
-— [מקור], [תאריך]
+אם אין מידע עדכני — כתוב בשני החלקים: "לא מצאתי כיסוי עדכני. נסה לנסח אחרת." """
 
-🔹 *[ציטוט 3 — משפט אחד, מתורגם]*
-— [מקור], [תאריך]
-
-━━━━━━━━━━━━━━━━
-
-💡 *מה בולט:* [משפט אחד — מה הכיסוי הבינלאומי מדגיש שפחות שומעים בישראל]
-
-אם אין מידע עדכני — כתוב: "לא מצאתי כיסוי עדכני על זה. נסה לנסח אחרת או שאל על אירוע ספציפי." """
-
-SYSTEM_OTHER = """אתה חושף לישראלים את הפער בין הנרטיבים — איך אותו אירוע נראה אחרת לגמרי בתקשורות שונות.
+# פרומפט להרחבה לפי בחירת משתמש
+SYSTEM_EXPAND = """אתה ממשיך שיחה על הנושא שהמשתמש שאל עליו.
 התאריך היום: {today}.
+הרחב לפי הבקשה הספציפית — עברית פשוטה, קצר וממוקד.
+אם אין מידע עדכני — אמור בכנות."""
 
-חוקים קריטיים:
-- הבא מידע מהשנה האחרונה בלבד. אם אין — אמור במפורש.
-- לעולם אל תביא מידע ישן בלי להזהיר.
-- עברית פשוטה, זורמת, לא אקדמית.
+async def ask_gemini(query: str, expand_prompt: str = None) -> tuple:
+    """מחזיר (חלק_א, חלק_ב) או (טקסט_הרחבה, None)"""
+    if expand_prompt:
+        system = SYSTEM_EXPAND.format(today=today_str())
+        prompt = f"{system}\n\nנושא: {query}\nבקשה: {expand_prompt}"
+        try:
+            response = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content.strip(), None
+        except Exception as e:
+            logger.error(f"Groq expand error: {e}")
+            return "⚠️ שגיאה זמנית.", None
 
-פורמט קבוע — תמיד בדיוק כך:
-
-📍 *[האירוע — שורה אחת]*
-
-━━━━━━━━━━━━━━━━
-
-🇮🇱 *בישראל קוראים לזה:*
-"[ציטוט או תיאור קצר]"
-
-🌍 *במערב קוראים לזה:*
-"[ציטוט או תיאור קצר]"
-
-🌙 *בעולם הערבי/גלובל-סאות' קוראים לזה:*
-"[ציטוט או תיאור קצר]"
-
-━━━━━━━━━━━━━━━━
-
-🔍 *הפער:* [משפט אחד — מה ההבדל שרוב הישראלים לא רואים]
-
-⚠️ _זהו הנרטיב כפי שמוצג בתקשורת הבינלאומית — לא עמדת הבוט._
-
-אם אין מידע עדכני — כתוב: "לא מצאתי כיסוי עדכני על זה. נסה לנסח אחרת." """
-
-async def ask_gemini(query: str, mode: str) -> str:
-    system = (SYSTEM_OBJECTIVE if mode == "objective" else SYSTEM_OTHER).format(today=today_str())
+    system = SYSTEM_MAIN.format(today=today_str())
     prompt = f"{system}\n\nשאלת המשתמש: {query}"
     try:
-        response = await asyncio.to_thread(gemini.generate_content, prompt)
-        return response.text.strip()
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500,
+            temperature=0.3,
+        )
+        text = response.choices[0].message.content.strip()
+        if "<<<PART2>>>" in text:
+            parts = text.split("<<<PART2>>>")
+            return parts[0].strip(), parts[1].strip()
+        return text, None
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
-        return "⚠️ שגיאה זמנית. נסה שוב בעוד רגע."
+        logger.error(f"Groq error: {e}")
+        return "⚠️ שגיאה זמנית. נסה שוב בעוד רגע.", None
 
 # ── מקלדות ────────────────────────────────────────────────────────────────────
 
 def main_keyboard():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⚖️ אובייקטיבי", callback_data="mode_objective"),
-            InlineKeyboardButton("🔴 הנרטיב האחר", callback_data="mode_other"),
-        ],
         [InlineKeyboardButton("📰 מה חדש עכשיו?", callback_data="latest")],
-        [InlineKeyboardButton("⭐ 20 שאלות נוספות — כוכבי טלגרם", callback_data="buy_stars")],
-        [InlineKeyboardButton("💚 חודש ללא הגבלה — פייבוקס", callback_data="buy_paybox")],
+        [InlineKeyboardButton("💳 20 שאלות נוספות — 5 ₪", callback_data="buy_pack")],
+        [InlineKeyboardButton("💚 חודש ללא הגבלה — 20 ₪", callback_data="buy_paybox")],
         [InlineKeyboardButton("📤 שתף חבר — קבל 3 שאלות בונוס", callback_data="referral")],
+    ])
+
+def expand_keyboard(query: str):
+    """כפתורי הרחבה שמופיעים אחרי כל תשובה"""
+    import urllib.parse
+    q = urllib.parse.quote(query)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌙 זווית ערבית", callback_data=f"expand_arab|{query[:40]}"),
+            InlineKeyboardButton("🗺️ מפת אינטרסים", callback_data=f"expand_interests|{query[:40]}"),
+        ],
+        [InlineKeyboardButton("🔒 הידיעה שישראל לא סיקרה", callback_data=f"expand_hidden|{query[:40]}")],
     ])
 
 def limit_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ 20 שאלות — 50 כוכבים (מיידי)", callback_data="buy_stars")],
-        [InlineKeyboardButton("💚 חודש ללא הגבלה — פייבוקס", callback_data="buy_paybox")],
+        [InlineKeyboardButton("💳 20 שאלות — 5 ₪", callback_data="buy_pack")],
+        [InlineKeyboardButton("💚 חודש ללא הגבלה — 20 ₪", callback_data="buy_paybox")],
         [InlineKeyboardButton("📤 שתף חבר — קבל 3 שאלות בונוס", callback_data="referral")],
     ])
 
@@ -216,11 +238,12 @@ WELCOME = """👁️ *מבט מבחוץ*
 
 מה כותבים על ישראל בעולם — בעברית, בלי פילטרים.
 
-✅ *3 שאלות ביום* — הטבה ל-500 המצטרפים הראשונים
-✅ שני מצבים: אובייקטיבי 🔹 או נרטיב אחר 🔴
-✅ ציטוטים מתורגמים מהעיתונות הבינלאומית
+כתוב כל נושא או אירוע. תקבל:
+🔹 מבט מהיר — שלושה נרטיבים בשורה אחת
+🔹 הסיפור המלא — ציטוטים, מקורות, מה שלא מגיע לישראל
+🔹 אפשרות להעמיק לכל כיוון שמעניין אותך
 
-כתוב כל נושא או אירוע — ואני אחפש."""
+✅ *3 שאלות ביום* — הטבה ל-500 המצטרפים הראשונים"""
 
 # ── handlers ──────────────────────────────────────────────────────────────────
 
@@ -255,30 +278,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     user = get_user(data, uid)
 
-    if q.data in ("mode_objective", "mode_other"):
-        user["mode"] = q.data.replace("mode_", "")
-        save_data(data)
-        label = "⚖️ אובייקטיבי" if user["mode"] == "objective" else "🔴 הנרטיב האחר"
-        await q.message.reply_text(
-            f"עברת למצב: *{label}*\n\nכתוב נושא ואחפש.",
-            parse_mode="Markdown"
-        )
+    if q.data.startswith("expand_"):
+        parts = q.data.split("|", 1)
+        expand_type = parts[0].replace("expand_", "")
+        original_query = parts[1] if len(parts) > 1 else "הנושא"
+
+        expand_map = {
+            "arab": "הרחב על הכיסוי בתקשורת הערבית והמוסלמית בלבד — מקורות, זוויות, ציטוטים",
+            "interests": "הסבר מפת האינטרסים — מי מרוויח מהנרטיב הזה, מי מפסיד, ומדוע כל צד מציג זאת כך",
+            "hidden": "הבא את הידיעה או הזווית שלא סוקרה בישראל — מקור ספציפי, מה נאמר, ולמה זה לא הגיע לכאן",
+        }
+        expand_prompt = expand_map.get(expand_type, "הרחב על הנושא")
+
+        thinking = await q.message.reply_text("🔍 מחפש...")
+        result, _ = await ask_gemini(original_query, expand_prompt)
+        await thinking.edit_text(result[:3900], parse_mode="Markdown")
+        return
 
     elif q.data == "latest":
         await _process_query(
             update, context,
-            f"מה החדשות הבינלאומיות הכי חשובות על ישראל ומזרח התיכון היום {today_str()}?",
+            f"מה שלוש החדשות הבינלאומיות הכי חשובות על ישראל ומזרח התיכון היום {today_str()}?",
             uid, data, user, from_callback=True
         )
 
-    elif q.data == "buy_stars":
-        await q.message.reply_invoice(
-            title="20 שאלות נוספות",
-            description="חבילת שאלות נוספות לבוט מבט מבחוץ",
-            payload="questions_pack",
-            currency="XTR",
-            prices=[LabeledPrice("20 שאלות", STARS_PER_PACK)],
+    elif q.data in ("buy_stars", "buy_pack"):
+        text = (
+            f"💳 *20 שאלות נוספות — 5 ₪*\n\n"
+            f"שלח 5 ₪ בביט למספר: {BIT_PHONE}\n\n"
+            f"⚠️ חשוב: בהערה כתוב את המספר הזה:\n`{uid}`\n\n"
+            f"תוך 24 שעות יתווספו 20 שאלות לחשבונך."
         )
+        await q.message.reply_text(text, parse_mode="Markdown")
 
     elif q.data == "buy_paybox":
         text = (
@@ -342,11 +373,8 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
         await reply.reply_text(msg, parse_mode="Markdown", reply_markup=limit_keyboard())
         return
 
-    mode = user.get("mode", "objective")
-    mode_label = "אובייקטיבי" if mode == "objective" else "הנרטיב האחר"
-
     # זיהוי שאלה עמומה מדי — לא נספרת במכסה
-    if len(query.strip()) <= 6 and not any(c in query for c in ['?', '!']):
+    if len(query.strip()) <= 6 and not any(c in query for c in ["?", "!"]):
         await reply.reply_text(
             "🤔 *קצת עמום לי...*\n\n"
             "תן לי יותר הקשר — על מה בדיוק?\n\n"
@@ -355,22 +383,33 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
         )
         return
 
-    thinking = await reply.reply_text(f"🔍 מחפש [{mode_label}]...")
+    thinking = await reply.reply_text("🔍 מחפש בכותרות הבינלאומיות...")
 
-    result = await ask_gemini(query, mode)
+    part1, part2 = await ask_gemini(query)
     use_question(data, uid, reason)
 
+    # שליחת חלק א — מבט מהיר
+    await thinking.edit_text(part1[:3900], parse_mode="Markdown")
+
+    # שליחת חלק ב — עומק + פיתיון
+    if part2:
+        await reply.reply_text(part2[:3900], parse_mode="Markdown",
+                               reply_markup=expand_keyboard(query))
+    else:
+        await reply.reply_text("לפרטים נוספים — שאל שאלת המשך.",
+                               reply_markup=expand_keyboard(query))
+
     # הצעת שיתוף אחת מכל 5 שאלות
-    footer = ""
     user = get_user(load_data(), uid)
     if user["total_questions"] > 0 and user["total_questions"] % 5 == 0:
         bot_username = (await context.bot.get_me()).username
         ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
-        footer = f"\n\n📤 _אהבת? שתף חבר וקבל 3 שאלות בונוס:_\n`{ref_link}`"
+        await reply.reply_text(
+            f"📤 _אהבת? שתף חבר וקבל 3 שאלות בונוס:_\n`{ref_link}`",
+            parse_mode="Markdown"
+        )
 
-    await thinking.edit_text(result[:3900] + footer, parse_mode="Markdown")
-
-    # תזכורת עדינה אחרי שנוצלה השאלה החינמית
+    # תזכורת עדינה אחרי שנוצלה המכסה
     if reason == "free":
         user = get_user(load_data(), uid)
         if user["daily_used"] >= get_daily_limit(load_data()):
@@ -378,7 +417,7 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
                 "💡 _נוצלו כל השאלות של היום. חזור מחר, או הוסף שאלות עכשיו:_",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⭐ 20 שאלות — כוכבים", callback_data="buy_stars"),
+                    InlineKeyboardButton("💳 20 שאלות — 5 ₪", callback_data="buy_pack"),
                     InlineKeyboardButton("📤 שתף וקבל בונוס", callback_data="referral"),
                 ]])
             )
