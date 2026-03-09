@@ -368,7 +368,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _process_query(update, context, query, uid, data, user, from_callback=False):
     allowed, reason = can_ask(data, uid)
-    reply = update.callback_query.message if from_callback else update.message
+    if from_callback:
+        chat_id = update.callback_query.message.chat_id
+        # wrapper שמאפשר שליחה גמישה בין callback למסר רגיל
+        class _Reply:
+            def __init__(self, bot, cid):
+                self._bot = bot
+                self._cid = cid
+            async def reply_text(self, text, **kwargs):
+                return await self._bot.send_message(self._cid, text, **kwargs)
+        reply = _Reply(context.bot, chat_id)
+    else:
+        reply = update.message
 
     if not allowed:
         if reason == "global_cap":
