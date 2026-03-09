@@ -1,6 +1,6 @@
 """
 מבט מבחוץ — בוט טלגרם
-תכונות: Groq/Llama חינמי, מגבלת שאלות ביום, ביט, ויראליות, פורמט מאוחד
+גרסה 2.0 — פרומפט חדש, adaptive response, פיתיון דינמי, broadcast
 """
 
 import os
@@ -9,7 +9,7 @@ import json
 import asyncio
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ContextTypes, filters
@@ -26,13 +26,11 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 GROQ_KEY           = os.environ["GROQ_API_KEY"]
 ADMIN_ID           = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
+BIT_PHONE          = os.environ.get("BIT_PHONE", "")
 
-DAILY_FREE         = 3     # שאלות חינמיות ביום (500 ראשונים) לכל משתמש
-STARS_PER_PACK     = 50    # כוכבי טלגרם לחבילה
-QUESTIONS_PER_PACK = 20    # שאלות בחבילה
-DAILY_GLOBAL_CAP   = 5000  # מגבלת חירום — נכנסת לפעולה רק במצב קיצוני
-PAYBOX_PRICE_ILS   = 20    # מחיר בשקלים לחודש
-BIT_PHONE          = os.environ.get("BIT_PHONE", "")  # מספר ביט — הגדר ב-Railway
+DAILY_FREE         = 3
+QUESTIONS_PER_PACK = 20
+DAILY_GLOBAL_CAP   = 5000
 
 # ── אחסון נתונים ──────────────────────────────────────────────────────────────
 
@@ -53,8 +51,7 @@ def get_user(data, uid):
             "daily_date": "",
             "daily_used": 0,
             "extra_questions": 0,
-            "paid_until": "",          # תאריך YYYY-MM-DD — גישה מלאה עד
-            "mode": "objective",
+            "paid_until": "",
             "total_questions": 0,
             "referred_by": None,
             "referral_count": 0,
@@ -63,40 +60,26 @@ def get_user(data, uid):
     return data["users"][uid]
 
 def get_daily_limit(data):
-    """3 שאלות ל-500 הראשונים, אחר כך 2."""
     free_users = sum(1 for u in data["users"].values() if not u.get("paid_until"))
     return DAILY_FREE if free_users <= 500 else 2
 
 def can_ask(data, uid):
-    """בודק אם המשתמש יכול לשאול. מחזיר (bool, סיבה)."""
     today = str(date.today())
-
-    # איפוס מונה גלובלי יומי
     if data["global"]["date"] != today:
         data["global"] = {"date": today, "count": 0}
-
     user = get_user(data, uid)
-
-    # משלמים — פטורים מכל מגבלה, תמיד עוברים
     if user["paid_until"] and user["paid_until"] >= today:
         return True, "paid_unlimited"
-
-    # מגבלה גלובלית — חלה רק על משתמשים חינמיים
     if data["global"]["count"] >= DAILY_GLOBAL_CAP:
         return False, "global_cap"
-
-    # שאלות נוספות מכוכבים
     if user["extra_questions"] > 0:
         return True, "extra"
-
-    # שאלות חינמיות יומיות (3 ל-500 ראשונים, אחר כך 2)
     daily_limit = get_daily_limit(data)
     if user["daily_date"] != today:
         user["daily_date"] = today
         user["daily_used"] = 0
     if user["daily_used"] < daily_limit:
         return True, "free"
-
     return False, "limit_reached"
 
 def use_question(data, uid, reason):
@@ -112,67 +95,110 @@ def use_question(data, uid, reason):
 # ── Groq ──────────────────────────────────────────────────────────────────────
 
 groq_client = Groq(api_key=GROQ_KEY)
-GROQ_MODEL = "compound-beta"
+GROQ_MODEL = "compound-beta"  # חיפוש אינטרנט בזמן אמת
 
 def today_str():
     return datetime.now().strftime("%d.%m.%Y")
 
-# פרומפט אחד מאוחד — מחזיר שני חלקים
-SYSTEM_MAIN = """אתה עיתונאי בינלאומי שחושף לישראלים את הפער בין הנרטיבים.
+# ══════════════════════════════════════════════════════════════════════════════
+# הפרומפט הראשי — הלב של הבוט
+# ══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_MAIN = """אתה "מבט מבחוץ" — עיתונאי בינלאומי שמביא לישראלים את מה שהתקשורת שלהם לא מראה להם.
 התאריך היום: {today}.
+יש לך גישה לאינטרנט — חפש מידע אמיתי ועדכני לפני שאתה עונה.
 
-חוקים קריטיים:
-- מידע מהשנה האחרונה בלבד. אם אין — אמור במפורש.
-- עברית פשוטה, זורמת, לא אקדמית.
-- לעולם אל תמציא ציטוטים.
+══ חוקי ברזל ══
+1. חפש באינטרנט לפני שאתה עונה — אל תסתמך על ידע ישן.
+2. כל ציטוט חייב: שם מקור + תאריך. אם אין — אל תמציא, אמור "לא מצאתי".
+3. תרגם הכל לעברית — אין כותרות, ציטוטים, או ביטויים באנגלית.
+4. קרא את השאלה: אם קצרה ויומיומית — דבר פשוט; אם עמוקה וטכנית — דבר בעומק.
+5. שלושת הנרטיבים (ישראל / המערב / עולם ערבי) — על אותו אירוע בדיוק, לא על אירועים שונים.
 
-החזר תשובה בשני חלקים מופרדים על ידי הסימן <<<PART2>>>
+══ הפורמט ══
+החזר תשובה בשני חלקים, מופרדים על ידי: <<<PART2>>>
 
-===חלק א — מבט מהיר===
-פורמט קבוע:
+— חלק א: מבט מהיר —
+📍 *[כותרת בעברית — מה קורה, מנוסח כמו כותרת שגורמת לאנשים לעצור]*
 
-📍 *[כותרת — מה קורה]*
+🇮🇱 *ישראל:* "[מה הכותרות הישראליות אומרות]"
+🌍 *המערב:* "[מה התקשורת המערבית אומרת — בעברית]"
+🌙 *העולם הערבי:* "[מה התקשורת הערבית אומרת — בעברית]"
 
-🇮🇱 *ישראל:* "[ציטוט קצר או תיאור]"
-🌍 *המערב:* "[ציטוט קצר או תיאור]"
-🌙 *העולם הערבי:* "[ציטוט קצר או תיאור]"
-
-🔍 *הפער:* [משפט אחד — מה שישראלים לא שומעים]
+🔍 *הפער:* [משפט אחד חד — מה ישראלים לא שומעים ולמה זה חשוב]
 
 <<<PART2>>>
 
-===חלק ב — מה שמאחורי הכותרות===
-פורמט קבוע:
-
+— חלק ב: מה שמאחורי הכותרות —
 📰 *הסיפור המלא*
 
-🔹 [ציטוט 1 מתורגם — משפט שלם]
-— [מקור], [תאריך]
+🔹 [ציטוט מתורגם — משפט שלם, לא קטוע]
+— *[שם המקור]*, [תאריך]
 
-🔹 [ציטוט 2 מתורגם — משפט שלם]
-— [מקור], [תאריך]
+🔹 [ציטוט מתורגם — משפט שלם]
+— *[שם המקור]*, [תאריך]
 
-🔹 [ציטוט 3 מתורגם — משפט שלם]
-— [מקור], [תאריך]
+🔹 [ציטוט מתורגם — משפט שלם]
+— *[שם המקור]*, [תאריך]
 
 ━━━━━━━━━━━━━━━━
-💡 *מה בולט:* [מה הכיסוי הבינלאומי מדגיש שפחות שומעים בישראל]
+💡 *מה שבולט:* [משפט-שניים — מה הכיסוי הבינלאומי מדגיש שלא מגיע לישראל]
 
-🔒 *יש עוד:* [משפט אחד מסקרן שמרמז על זווית נוספת — בלי לחשוף אותה. משהו שגרם לך לעצור ולחשוב. ניסוח בסגנון: "יש דיווח שפורסם רק ב-X ולא הגיע לישראל..."]
+🔒 *{bait}*
 
-אם אין מידע עדכני — כתוב בשני החלקים: "לא מצאתי כיסוי עדכני. נסה לנסח אחרת." """
+אם לא מצאת מידע אמיתי ועדכני — כתוב בשניהם: "לא מצאתי כיסוי עדכני על הנושא הזה. נסה לנסח אחרת או שאל על נושא ספציפי יותר."
+"""
 
-# פרומפט להרחבה לפי בחירת משתמש
-SYSTEM_EXPAND = """אתה ממשיך שיחה על הנושא שהמשתמש שאל עליו.
+# ══════════════════════════════════════════════════════════════════════════════
+# פרומפט לפיתיון דינמי — נולד מהתשובה עצמה
+# ══════════════════════════════════════════════════════════════════════════════
+
+BAIT_PROMPT = """בהתבסס על התוכן שמצאת על הנושא "{query}", כתוב משפט פיתיון אחד בלבד.
+המשפט צריך:
+- להיות ספציפי לנושא הזה, לא גנרי
+- לרמוז על פרט, זווית, או דיווח שלא חשפת עדיין
+- לגרום לאדם לרצות לדעת עוד — כמו פרק טלוויזיה שנגמר בקליפהנגר
+- להתחיל ב"יש" / "קיים" / "פורסם" / "נחשף" — משהו שנשמע ממשי ולא מומצא
+- להיות קצר — משפט אחד, עד 20 מילה
+
+כתוב רק את המשפט, בלי הסבר, בלי נקודותיים."""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# פרומפט להרחבה
+# ══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_EXPAND = """אתה ממשיך שיחה על: "{query}".
 התאריך היום: {today}.
-הרחב לפי הבקשה הספציפית — עברית פשוטה, קצר וממוקד.
-אם אין מידע עדכני — אמור בכנות."""
+חפש מידע עדכני ותשב לפי הבקשה הספציפית.
+עברית פשוטה. מקורות אמיתיים עם תאריכים. אם אין — אמור בכנות."""
 
-async def ask_gemini(query: str, expand_prompt: str = None) -> tuple:
+# ══════════════════════════════════════════════════════════════════════════════
+# קריאות API
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def generate_bait(query: str) -> str:
+    """יוצר פיתיון דינמי ספציפי לנושא."""
+    try:
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": BAIT_PROMPT.format(query=query)}],
+            max_tokens=60,
+            temperature=0.7,
+        )
+        bait = response.choices[0].message.content.strip()
+        # הסר מרכאות אם יש
+        bait = bait.strip('"').strip("'")
+        return bait if bait else "יש עוד זווית אחת שלא פורסמה בישראל — שאל ואסביר."
+    except Exception:
+        return "יש עוד זווית אחת שלא פורסמה בישראל — שאל ואסביר."
+
+async def ask_groq(query: str, expand_prompt: str = None) -> tuple:
     """מחזיר (חלק_א, חלק_ב) או (טקסט_הרחבה, None)"""
+
     if expand_prompt:
-        system = SYSTEM_EXPAND.format(today=today_str())
-        prompt = f"{system}\n\nנושא: {query}\nבקשה: {expand_prompt}"
+        system = SYSTEM_EXPAND.format(query=query, today=today_str())
+        prompt = f"{system}\n\nבקשה: {expand_prompt}"
         try:
             response = await asyncio.to_thread(
                 groq_client.chat.completions.create,
@@ -184,10 +210,14 @@ async def ask_gemini(query: str, expand_prompt: str = None) -> tuple:
             return response.choices[0].message.content.strip(), None
         except Exception as e:
             logger.error(f"Groq expand error: {e}")
-            return "⚠️ שגיאה זמנית.", None
+            return "⚠️ שגיאה זמנית. נסה שוב.", None
 
-    system = SYSTEM_MAIN.format(today=today_str())
+    # יצירת פיתיון דינמי לפני השאלה הראשית
+    bait = await generate_bait(query)
+
+    system = SYSTEM_MAIN.format(today=today_str(), bait=bait)
     prompt = f"{system}\n\nשאלת המשתמש: {query}"
+
     try:
         response = await asyncio.to_thread(
             groq_client.chat.completions.create,
@@ -197,34 +227,30 @@ async def ask_gemini(query: str, expand_prompt: str = None) -> tuple:
             temperature=0.3,
         )
         text = response.choices[0].message.content.strip()
+
         if "<<<PART2>>>" in text:
-            parts = text.split("<<<PART2>>>")
-            return parts[0].strip(), parts[1].strip()
-        return text, None
+            parts = text.split("<<<PART2>>>", 1)
+            part1 = parts[0].strip()
+            part2 = parts[1].strip()
+        else:
+            # אם המודל לא הפריד — חלוקה גסה באמצע
+            mid = len(text) // 2
+            part1 = text[:mid].strip()
+            part2 = text[mid:].strip()
+
+        return part1, part2
+
     except Exception as e:
-        logger.error(f"Groq error: {e}")
+        logger.error(f"Groq main error: {e}")
         return "⚠️ שגיאה זמנית. נסה שוב בעוד רגע.", None
 
 # ── מקלדות ────────────────────────────────────────────────────────────────────
 
-def main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📰 מה חדש עכשיו?", callback_data="latest")],
-        [InlineKeyboardButton("💳 20 שאלות נוספות — 5 ₪", callback_data="buy_pack")],
-        [InlineKeyboardButton("💚 חודש ללא הגבלה — 20 ₪", callback_data="buy_paybox")],
-        [InlineKeyboardButton("📤 שתף חבר — קבל 3 שאלות בונוס", callback_data="referral")],
-    ])
-
 def expand_keyboard(query: str):
-    """כפתורי הרחבה שמופיעים אחרי כל תשובה"""
-    import urllib.parse
-    q = urllib.parse.quote(query)
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🌙 זווית ערבית", callback_data=f"expand_arab|{query[:40]}"),
-            InlineKeyboardButton("🗺️ מפת אינטרסים", callback_data=f"expand_interests|{query[:40]}"),
-        ],
-        [InlineKeyboardButton("🔒 הידיעה שישראל לא סיקרה", callback_data=f"expand_hidden|{query[:40]}")],
+        [InlineKeyboardButton("🌙 הכיסוי הערבי", callback_data=f"expand_arab|{query[:60]}"),
+         InlineKeyboardButton("🗺️ מפת אינטרסים", callback_data=f"expand_interests|{query[:60]}")],
+        [InlineKeyboardButton("🔍 מה לא סוקר בישראל", callback_data=f"expand_hidden|{query[:60]}")],
     ])
 
 def limit_keyboard():
@@ -234,14 +260,17 @@ def limit_keyboard():
         [InlineKeyboardButton("📤 שתף חבר — קבל 3 שאלות בונוס", callback_data="referral")],
     ])
 
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌍 מה חדש עכשיו?", callback_data="latest")],
+    ])
+
 WELCOME = """👁️ *מבט מבחוץ*
 
 מה כותבים על ישראל בעולם — בעברית, בלי פילטרים.
 
-כתוב כל נושא או אירוע. תקבל:
-🔹 מבט מהיר — שלושה נרטיבים בשורה אחת
-🔹 הסיפור המלא — ציטוטים, מקורות, מה שלא מגיע לישראל
-🔹 אפשרות להעמיק לכל כיוון שמעניין אותך
+שאל כל שאלה על נושא שמעניין אותך.
+תקבל שלושה נרטיבים על אותו אירוע — ישראל, המערב, העולם הערבי — עם ציטוטים אמיתיים ומקורות.
 
 ✅ *3 שאלות ביום* — הטבה ל-500 המצטרפים הראשונים"""
 
@@ -252,7 +281,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     user = get_user(data, uid)
 
-    # טיפול בקישור הפניה
     args = context.args
     if args and args[0].startswith("ref_") and not user["referred_by"]:
         referrer_id = args[0][4:]
@@ -284,21 +312,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         original_query = parts[1] if len(parts) > 1 else "הנושא"
 
         expand_map = {
-            "arab": "הרחב על הכיסוי בתקשורת הערבית והמוסלמית בלבד — מקורות, זוויות, ציטוטים",
-            "interests": "הסבר מפת האינטרסים — מי מרוויח מהנרטיב הזה, מי מפסיד, ומדוע כל צד מציג זאת כך",
-            "hidden": "הבא את הידיעה או הזווית שלא סוקרה בישראל — מקור ספציפי, מה נאמר, ולמה זה לא הגיע לכאן",
+            "arab": "הרחב על הכיסוי בתקשורת הערבית והמוסלמית — מקורות, זוויות, ציטוטים בעברית",
+            "interests": "הסבר מפת האינטרסים — מי מרוויח מהנרטיב הזה, מי מפסיד, ולמה כל צד מציג את זה כך",
+            "hidden": "הבא דיווח ספציפי שלא סוקר בישראל — שם המקור, מה נאמר, ולמה זה לא הגיע לכאן",
         }
         expand_prompt = expand_map.get(expand_type, "הרחב על הנושא")
 
         thinking = await q.message.reply_text("🔍 מחפש...")
-        result, _ = await ask_gemini(original_query, expand_prompt)
+        result, _ = await ask_groq(original_query, expand_prompt)
         await thinking.edit_text(result[:3900], parse_mode="Markdown")
         return
 
     elif q.data == "latest":
         await _process_query(
             update, context,
-            f"מה שלוש החדשות הבינלאומיות הכי חשובות על ישראל ומזרח התיכון היום {today_str()}?",
+            f"מה הנושא הבינלאומי הכי בוער היום {today_str()} שנוגע לישראל ולא מדובר עליו מספיק בתקשורת הישראלית?",
             uid, data, user, from_callback=True
         )
 
@@ -313,9 +341,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data == "buy_paybox":
         text = (
-            f"💚 *גישה חודשית ללא הגבלה*\n\n"
-            f"מחיר: 20 ₪ לחודש\n\n"
-            f"שלח תשלום בביט למספר: {BIT_PHONE}\n\n"
+            f"💚 *גישה חודשית ללא הגבלה — 20 ₪*\n\n"
+            f"שלח 20 ₪ בביט למספר: {BIT_PHONE}\n\n"
             f"⚠️ חשוב: בהערה כתוב את המספר הזה:\n`{uid}`\n\n"
             f"תוך 24 שעות תקבל אישור ותוכל לשאול ללא הגבלה."
         )
@@ -333,20 +360,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await q.message.reply_text(text, parse_mode="Markdown")
 
-async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    data = load_data()
-    user = get_user(data, uid)
-    user["extra_questions"] += QUESTIONS_PER_PACK
-    save_data(data)
-    await update.message.reply_text(
-        f"✅ תשלום התקבל! נוספו לך {QUESTIONS_PER_PACK} שאלות.\n"
-        f"יתרה זמינה: {user['extra_questions']} שאלות נוספות + {DAILY_FREE} שאלות יומיות."
-    )
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     data = load_data()
@@ -361,20 +374,18 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
         if reason == "global_cap":
             msg = (
                 "⏳ *הבוט עמוס מאוד כרגע*\n\n"
-                "יותר מדי שאלות הגיעו בו-זמנית. נסה שוב בעוד כמה דקות או מחר בבוקר.\n\n"
-                "מנויי פייבוקס לא מושפעים מעומס זה."
+                "יותר מדי שאלות הגיעו בו-זמנית. נסה שוב בעוד כמה דקות."
             )
         else:
             msg = (
                 "📵 *מכסת השאלות היומית נוצלה*\n\n"
-                f"נוצלו כל השאלות של היום. חזור מחר — או הוסף שאלות עכשיו:\n\n"
-                "איך להמשיך:"
+                "חזור מחר — או הוסף שאלות עכשיו:"
             )
         await reply.reply_text(msg, parse_mode="Markdown", reply_markup=limit_keyboard())
         return
 
-    # זיהוי שאלה עמומה מדי — לא נספרת במכסה
-    if len(query.strip()) <= 6 and not any(c in query for c in ["?", "!"]):
+    # שאלה עמומה — לא נספרת
+    if len(query.strip()) <= 5 and not any(c in query for c in ["?", "!"]):
         await reply.reply_text(
             "🤔 *קצת עמום לי...*\n\n"
             "תן לי יותר הקשר — על מה בדיוק?\n\n"
@@ -385,13 +396,11 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
 
     thinking = await reply.reply_text("🔍 מחפש בכותרות הבינלאומיות...")
 
-    part1, part2 = await ask_gemini(query)
+    part1, part2 = await ask_groq(query)
     use_question(data, uid, reason)
 
-    # שליחת חלק א — מבט מהיר
     await thinking.edit_text(part1[:3900], parse_mode="Markdown")
 
-    # שליחת חלק ב — עומק + פיתיון
     if part2:
         await reply.reply_text(part2[:3900], parse_mode="Markdown",
                                reply_markup=expand_keyboard(query))
@@ -400,8 +409,9 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
                                reply_markup=expand_keyboard(query))
 
     # הצעת שיתוף אחת מכל 5 שאלות
-    user = get_user(load_data(), uid)
-    if user["total_questions"] > 0 and user["total_questions"] % 5 == 0:
+    fresh_data = load_data()
+    fresh_user = get_user(fresh_data, uid)
+    if fresh_user["total_questions"] > 0 and fresh_user["total_questions"] % 5 == 0:
         bot_username = (await context.bot.get_me()).username
         ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
         await reply.reply_text(
@@ -409,10 +419,11 @@ async def _process_query(update, context, query, uid, data, user, from_callback=
             parse_mode="Markdown"
         )
 
-    # תזכורת עדינה אחרי שנוצלה המכסה
+    # תזכורת עדינה כשנגמרות שאלות
     if reason == "free":
-        user = get_user(load_data(), uid)
-        if user["daily_used"] >= get_daily_limit(load_data()):
+        fresh_data2 = load_data()
+        fresh_user2 = get_user(fresh_data2, uid)
+        if fresh_user2["daily_used"] >= get_daily_limit(fresh_data2):
             await reply.reply_text(
                 "💡 _נוצלו כל השאלות של היום. חזור מחר, או הוסף שאלות עכשיו:_",
                 parse_mode="Markdown",
@@ -447,7 +458,6 @@ async def approve_paybox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_data()
         user = get_user(data, target_id)
 
-        # אם יש גישה פעילה — מוסיפים על מה שנשאר
         today = str(date.today())
         current_until = user.get("paid_until", "")
         if current_until and current_until >= today:
@@ -459,7 +469,6 @@ async def approve_paybox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["paid_until"] = new_until
         save_data(data)
 
-        # אישור למנהל
         await update.message.reply_text(
             f"✅ אושר.\n"
             f"משתמש: {target_id}\n"
@@ -467,7 +476,6 @@ async def approve_paybox(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"גישה פעילה עד: {new_until}"
         )
 
-        # הודעה אוטומטית למשתמש
         month_word = "חודש" if months == 1 else f"{months} חודשים"
         await context.bot.send_message(
             int(target_id),
@@ -481,7 +489,7 @@ async def approve_paybox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"שגיאה: {e}")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """פקודת מנהל: /stats"""
+    """/stats — סטטיסטיקות"""
     if update.effective_user.id != ADMIN_ID:
         return
 
@@ -503,10 +511,46 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *סטטיסטיקות — מבט מבחוץ*\n\n"
         f"משתמשים רשומים: {total_users}\n"
         f"פעילים היום: {active_today}\n"
-        f"מנויים פעילים (פייבוקס): {paid_active}\n"
+        f"מנויים פעילים: {paid_active}\n"
         f"שאלות היום: {global_count} / {DAILY_GLOBAL_CAP}\n"
         f"סה\"כ שאלות (כל הזמנים): {total_q}",
         parse_mode="Markdown"
+    )
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /broadcast [הודעה]
+    שולח הודעה לכל המשתמשים הרשומים.
+    """
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("שימוש: /broadcast [טקסט ההודעה]")
+        return
+
+    message_text = " ".join(context.args)
+    data = load_data()
+    all_uids = list(data["users"].keys())
+
+    sent = 0
+    failed = 0
+    for uid_str in all_uids:
+        try:
+            await context.bot.send_message(
+                int(uid_str),
+                message_text,
+                parse_mode="Markdown"
+            )
+            sent += 1
+            await asyncio.sleep(0.05)  # מניעת rate-limit
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(
+        f"✅ שליחה הושלמה.\n"
+        f"נשלח ל: {sent} משתמשים\n"
+        f"נכשל: {failed}"
     )
 
 # ── הרצה ──────────────────────────────────────────────────────────────────────
@@ -516,11 +560,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("approve_paybox", approve_paybox))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(PreCheckoutQueryHandler(pre_checkout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    app.add_handler(PreCheckoutQueryHandler(lambda u, c: u.pre_checkout_query.answer(ok=True)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🤖 מבט מבחוץ — עולה...")
+    logger.info("🤖 מבט מבחוץ v2.0 — עולה...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
